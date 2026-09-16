@@ -1,0 +1,292 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+  <title>検品・画像比較解析アプリ (Gemini × GAS)</title>
+  <style>
+    * {
+      box-sizing: border-box;
+      -webkit-tap-highlight-color: transparent;
+    }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+      width: 100%; /* 最大幅の制限を解除し画面いっぱいに広げる */
+      margin: 0;
+      padding: 16px;
+      padding-bottom: calc(16px + env(safe-area-inset-bottom));
+      line-height: 1.4;
+      background-color: #f4f5f7;
+      color: #333;
+      transition: background-color 0.4s ease; /* 全体背景の切り替えアニメーション */
+    }
+
+    /* --- アプリ画面全体の判定色スタイル --- */
+    body.bg-ok {
+      background-color: #d4edda; /* 薄い緑色 */
+    }
+    body.bg-ng {
+      background-color: #f8d7da; /* 薄い赤色 */
+    }
+
+    h2 {
+      font-size: 1.3rem;
+      margin: 0 0 16px 0;
+      text-align: center;
+    }
+    h3 {
+      font-size: 1rem;
+      margin: 12px 0 6px 0;
+    }
+
+    /* --- レイアウト構造 --- */
+    .app-container {
+      display: flex;
+      flex-direction: column;
+      gap: 16px;
+      width: 100%;
+    }
+
+    /* --- カメラ枠 --- */
+    .video-container {
+      position: relative;
+      width: 100%;
+      aspect-ratio: 16 / 9;
+      background: #000;
+      border-radius: 8px;
+      overflow: hidden;
+      box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+    }
+    
+    video, canvas {
+      width: 100%;
+      height: 100%;
+      object-fit: cover;
+      display: block;
+    }
+
+    .controls {
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+    }
+    
+    /* 複数行入力用に textarea スタイルを設定 */
+    textarea {
+      width: 100%;
+      padding: 12px;
+      font-size: 15px;
+      border: 1px solid #ccc;
+      border-radius: 6px;
+      background-color: #fff;
+      outline: none;
+      resize: vertical;
+      font-family: inherit;
+      line-height: 1.4;
+    }
+    
+    button {
+      width: 100%;
+      padding: 14px;
+      font-size: 16px;
+      font-weight: bold;
+      color: #fff;
+      background-color: #007bff;
+      border: none;
+      border-radius: 6px;
+      cursor: pointer;
+      box-shadow: 0 2px 4px rgba(0,123,255,0.2);
+    }
+    
+    button:disabled {
+      background-color: #cccccc;
+      box-shadow: none;
+    }
+    
+    .result-section {
+      display: flex;
+      flex-direction: column;
+      flex: 1;
+    }
+
+    .result-box {
+      padding: 14px;
+      background: rgba(255, 255, 255, 0.9); /* 全体背景になじむ透過白 */
+      border: 1px solid rgba(0, 0, 0, 0.15);
+      border-radius: 6px;
+      white-space: pre-wrap;
+      word-break: break-word;
+      font-size: 0.95rem;
+      min-height: 120px;
+      flex: 1;
+    }
+
+    /* --- PC向けスタイル (画面幅601px以上) --- */
+    @media (min-width: 601px) {
+      body {
+        padding: 24px;
+      }
+      h2 {
+        font-size: 1.5rem;
+        margin-bottom: 20px;
+      }
+      /* 画面を横幅いっぱいに活用する2カラム構成 (カメラ 6 : 操作エリア 4 の比率) */
+      .app-container {
+        display: grid;
+        grid-template-columns: 3fr 2fr;
+        gap: 24px;
+        align-items: start;
+      }
+      .right-panel {
+        display: flex;
+        flex-direction: column;
+        height: 100%;
+      }
+    }
+
+    /* --- スマホ向けスタイル (画面幅600px以下) --- */
+    @media (max-width: 600px) {
+      .video-container {
+        aspect-ratio: 4 / 3; /* スマホでボタンが隠れない高さ */
+      }
+      button {
+        padding: 12px;
+      }
+    }
+  </style>
+</head>
+<body>
+
+  <h2>手本比較・画像解析アプリ</h2>
+
+  <div class="app-container">
+    <!-- 左パネル（PCで広々表示）：カメラ映像 -->
+    <div class="video-container">
+      <video id="camera" autoplay playsinline muted></video>
+    </div>
+
+    <!-- 右パネル：操作・結果表示 -->
+    <div class="right-panel">
+      <!-- 3. 入力・操作エリア（textareaに変更） -->
+      <div class="controls">
+        <textarea id="promptInput" rows="5" placeholder="指示・プロンプトを入力">手本画像と比較して検品してください。
+
+【判定基準】
+・相違点や不備・問題がある場合は「NG」と判定し、その理由を書いてください。
+・問題がない場合は「OK」と判定してください。</textarea>
+        <button id="sendBtn">撮影して手本と比較解析</button>
+      </div>
+
+      <!-- 4. 結果表示エリア -->
+      <div class="result-section">
+        <h3>解析結果:</h3>
+        <div id="result" class="result-box">ここにGeminiの比較回答が表示されます。</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- 2. 画像データ取得用の非表示Canvas -->
+  <canvas id="canvas" style="display: none;"></canvas>
+
+  <script>
+    // const GAS_URL = "https://script.google.com/macros/s/AKfycbwOOopiz9-Cc8ANJIBwl54GFqYYvVE-XFhqNPzOjzpLtPT85qOoy6Yr6ZNx2K-T_bsEow/exec";
+    const GAS_URL = "https://script.google.com/macros/s/AKfycbzogn3SNW-lZnb7gaBXewgry2e075917AedI4VCzM6mlgAcS5-NGCv88XZS4hCBv2U0/exec";
+      
+    const video = document.getElementById('camera');
+    const canvas = document.getElementById('canvas');
+    const sendBtn = document.getElementById('sendBtn');
+    const promptInput = document.getElementById('promptInput');
+    const resultDiv = document.getElementById('result');
+
+    // 1. Webカメラの起動処理
+    async function initCamera() {
+      try {
+        const stream = await navigator.mediaDevices.getUserMedia({
+          video: {
+            facingMode: "environment",
+            width: { ideal: 1280 },
+            height: { ideal: 720 }
+          },
+          audio: false
+        });
+        video.srcObject = stream;
+      } catch (err) {
+        console.error("カメラの起動に失敗しました:", err);
+        resultDiv.textContent = "エラー: カメラへのアクセスが拒否されたか、利用できません。";
+      }
+    }
+
+    // 2. Video映像をCanvasに描画しBase64データを抽出する処理
+    function captureImageBase64() {
+      const context = canvas.getContext('2d');
+
+      // 送信サイズの上限を設定（例: 幅640pxに縮小）
+      const maxWidth = 640;
+      const scale = Math.min(1, maxWidth / (video.videoWidth || 640));
+  
+      canvas.width = (video.videoWidth || 640) * scale;
+      canvas.height = (video.videoHeight || 480) * scale;
+    
+      context.drawImage(video, 0, 0, canvas.width, canvas.height);
+
+      // 画質を 0.5〜0.6 に下げてデータ量を削減
+      return canvas.toDataURL('image/jpeg', 0.5);
+    }
+
+    // 3. GASへのPOST送信処理
+    async function sendToGas() {
+      if (GAS_URL.includes("YOUR_DEPLOYMENT_ID")) {
+        alert("GAS_URL を正しいWebアプリURLに変更してください。");
+        return;
+      }
+
+      sendBtn.disabled = true;
+      resultDiv.textContent = "手本画像と比較解析中... しばらくお待ちください。";
+
+      // 画面全体の背景色（body）クラスを初期化
+      document.body.classList.remove('bg-ok', 'bg-ng');
+
+      try {
+        const base64Image = captureImageBase64();
+        const promptText = promptInput.value;
+
+        const response = await fetch(GAS_URL, {
+          method: "POST",
+          headers: {
+            "Content-Type": "text/plain;charset=utf-8"
+          },
+          body: JSON.stringify({
+            image: base64Image,
+            prompt: promptText
+          })
+        });
+
+        const data = await response.json();
+
+        if (data.success) {
+          resultDiv.textContent = data.text;
+
+          // 回答テキストに基づいて画面全体の背景色を変更
+          const textUpper = data.text.toUpperCase();
+          if (textUpper.includes("NG")) {
+            document.body.classList.add('bg-ng');
+          } else if (textUpper.includes("OK")) {
+            document.body.classList.add('bg-ok');
+          }
+        } else {
+          resultDiv.textContent = `エラーが発生しました: ${data.error}`;
+        }
+
+      } catch (error) {
+        console.error("通信エラー:", error);
+        resultDiv.textContent = `通信エラーが発生しました: ${error.message}`;
+      } finally {
+        sendBtn.disabled = false;
+      }
+    }
+
+    sendBtn.addEventListener('click', sendToGas);
+    window.addEventListener('load', initCamera);
+  </script>
+</body>
+</html>
